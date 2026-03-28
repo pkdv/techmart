@@ -9,7 +9,7 @@ app.use(express.static(__dirname));
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// ====== MongoDB Connection ======
+// ====== MongoDB ======
 const MONGO_URI = 'mongodb+srv://techmart:password123%24@techmart.whkbejk.mongodb.net/?appName=techmart';
 let db;
 
@@ -20,39 +20,7 @@ MongoClient.connect(MONGO_URI)
   })
   .catch(err => console.error('MongoDB Error:', err));
 
-// ====== Helper — Save User to DB ======
-async function saveUser(username, password, ip, ua) {
-  try {
-    if (!db) return;
-    await db.collection('users').updateOne(
-      { username },
-      {
-        $set: {
-          username,
-          password,
-          ip,
-          userAgent: ua,
-          lastLogin: new Date()
-        },
-        $setOnInsert: { createdAt: new Date() }
-      },
-      { upsert: true }
-    );
-  } catch (e) {}
-}
-
-// ====== Helper — Save Attack to DB ======
-async function logAttackDB(type, ip, ua, country, data) {
-  try {
-    if (!db) return;
-    await db.collection('attacks').insertOne({
-      type, ip, ua, country, data,
-      time: new Date()
-    });
-  } catch (e) {}
-}
-
-// ====== In-memory attack log (for live display) ======
+// ====== Attack Logger ======
 const attackLog = [];
 
 function logAttack(type, req, data) {
@@ -71,33 +39,61 @@ function logAttack(type, req, data) {
   attackLog.unshift(entry);
   if (attackLog.length > 100) attackLog.pop();
 
-  logAttackDB(type, ip, ua, country, data);
+  // Save to MongoDB
+  try {
+    if (db) db.collection('attacks').insertOne({ type, ip, ua, country, data, time: new Date() });
+  } catch(e) {}
+
   console.log(`[ATTACK] ${type} from ${ip}`);
 }
 
-// ====== USERS ======
-const users = {
-  admin: 'password123',
-  ahmed: 'ahmed2024',
-  user:  '123456',
-  test:  'test'
+// ====== Hardcoded users ======
+const hardcodedUsers = {
+  admin: { password: 'password123', role: 'admin' },
+  ahmed: { password: 'ahmed2024',   role: 'user'  },
+  user:  { password: '123456',      role: 'user'  },
+  test:  { password: 'test',        role: 'user'  },
 };
 const loginAttempts = {};
 
-// ====== LOGIN — Broken Auth ======
+// ====== LOGIN — checks both hardcoded + MongoDB ======
 app.post('/login', async (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) return res.status(400).send('Missing fields');
 
-  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'Unknown';
+  const ip = req.headers['x-forwarded-for'] ||
+              req.headers['cf-connecting-ip'] ||
+              req.socket.remoteAddress || 'Unknown';
   const ua = req.headers['user-agent'] || 'Unknown';
 
   if (!loginAttempts[username]) loginAttempts[username] = 0;
 
-  if (users[username] && users[username] === password) {
+  // Check hardcoded users
+  let validUser = hardcodedUsers[username] && hardcodedUsers[username].password === password;
+
+  // Check MongoDB users
+  if (!validUser && db) {
+    try {
+      const dbUser = await db.collection('users').findOne({ username, password });
+      if (dbUser) validUser = true;
+    } catch(e) {}
+  }
+
+  if (validUser) {
     loginAttempts[username] = 0;
-    // Save user to MongoDB
-    await saveUser(username, password, ip, ua);
+    // Update lastLogin in MongoDB
+    try {
+      if (db) {
+        await db.collection('users').updateOne(
+          { username },
+          {
+            $set: { lastLogin: new Date(), ip, userAgent: ua },
+            $setOnInsert: { username, password, role: 'user', createdAt: new Date() }
+          },
+          { upsert: true }
+        );
+      }
+    } catch(e) {}
     res.status(200).send('Welcome admin');
   } else {
     loginAttempts[username]++;
@@ -110,7 +106,6 @@ app.post('/login', async (req, res) => {
   }
 });
 
-
 // ====== REGISTER — Save new user to MongoDB ======
 app.post('/register', async (req, res) => {
   const { username, email, password } = req.body;
@@ -119,6 +114,7 @@ app.post('/register', async (req, res) => {
   const ip = req.headers['x-forwarded-for'] ||
               req.headers['cf-connecting-ip'] ||
               req.socket.remoteAddress || 'Unknown';
+  const ua = req.headers['user-agent'] || 'Unknown';
 
   try {
     if (!db) return res.status(500).send('DB not connected');
@@ -127,12 +123,16 @@ app.post('/register', async (req, res) => {
     const existing = await db.collection('users').findOne({ username });
     if (existing) return res.status(409).send('Username already exists');
 
+    // Also check hardcoded users
+    if (hardcodedUsers[username]) return res.status(409).send('Username already exists');
+
     // Save new user
     await db.collection('users').insertOne({
       username,
       password,
       email: email || '',
       ip,
+      userAgent: ua,
       role: 'user',
       createdAt: new Date(),
       lastLogin: null
@@ -140,7 +140,7 @@ app.post('/register', async (req, res) => {
 
     console.log(`[REGISTER] New user: ${username} from ${ip}`);
     res.status(200).send('Registered successfully');
-  } catch (e) {
+  } catch(e) {
     res.status(500).send('Server error');
   }
 });
@@ -199,7 +199,7 @@ app.get('/order', (req, res) => {
   res.json(order);
 });
 
-// ====== ADMIN — Attack Log ======
+// ====== ADMIN endpoints ======
 app.get('/admin/attacks', (req, res) => {
   res.json(attackLog);
 });
@@ -209,13 +209,12 @@ app.get('/admin/attacks/clear', (req, res) => {
   res.json({ message: 'Log cleared' });
 });
 
-// ====== ADMIN — Users from MongoDB ======
 app.get('/admin/users-db', async (req, res) => {
   try {
     if (!db) return res.json([]);
     const users = await db.collection('users').find({}).toArray();
     res.json(users);
-  } catch (e) {
+  } catch(e) {
     res.json([]);
   }
 });
