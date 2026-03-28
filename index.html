@@ -1154,6 +1154,11 @@ function switchAdminTab(tab, btn) {
   document.querySelectorAll('.admin-nav-btn').forEach(b => b.classList.remove('active'));
   document.getElementById('tab-'+tab).classList.add('active');
   btn.classList.add('active');
+  clearInterval(attackInterval);
+  if (tab === 'attacks') {
+    loadAttacks();
+    attackInterval = setInterval(loadAttacks, 5000);
+  }
 }
 
 // ====== CART ======
@@ -1278,16 +1283,6 @@ function clearAttacks() {
 
 // Auto-refresh every 5 seconds when on attacks tab
 let attackInterval = null;
-
-const origSwitchAdminTab = switchAdminTab;
-function switchAdminTab(tab, btn) {
-  origSwitchAdminTab(tab, btn);
-  clearInterval(attackInterval);
-  if (tab === 'attacks') {
-    loadAttacks();
-    attackInterval = setInterval(loadAttacks, 5000);
-  }
-}
 
 function showToast(msg) {
   const t = document.getElementById('toast');
