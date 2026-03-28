@@ -6,7 +6,6 @@ app.use(express.static(__dirname));
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// ⚠️ Vulnerable login endpoint — no rate limiting
 const users = {
   admin: 'password123',
   ahmed: 'ahmed2024',
@@ -24,13 +23,7 @@ app.post('/login', (req, res) => {
 });
 
 app.get('/', (req, res) => {
-  res.sendFile(__dirname + '/index.html', {
-    headers: {
-      'Cache-Control': 'no-cache, no-store, must-revalidate',
-      'Pragma': 'no-cache',
-      'Expires': '0'
-    }
-  });
+  res.sendFile(__dirname + '/index.html');
 });
 
 app.listen(port, () => {
