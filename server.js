@@ -2,25 +2,23 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const { MongoClient } = require('mongodb');
-const helmet = require('helmet');
 const app = express();
 const port = process.env.PORT || 3000;
-
-// ====== Helmet.js — HTTP Security Headers ======
-app.use(helmet());
-app.use(helmet.contentSecurityPolicy({
-  directives: {
-    defaultSrc: ["'self'"],
-    scriptSrc: ["'self'"],
-    styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
-    fontSrc: ["'self'", "https://fonts.gstatic.com"],
-    imgSrc: ["'self'", "data:"],
-  }
-}));
 
 app.use(express.static(__dirname));
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
+
+// ====== Security Headers (بدون helmet) ======
+app.use((req, res, next) => {
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Powered-By', '');
+  res.removeHeader('X-Powered-By');
+  res.setHeader('Strict-Transport-Security', 'max-age=31536000');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  next();
+});
 
 // ====== MongoDB ======
 const MONGO_URI = 'mongodb+srv://techmart:password123%24@techmart.whkbejk.mongodb.net/?appName=techmart';
@@ -38,7 +36,7 @@ function isValidUsername(u) {
   return typeof u === 'string' && /^[a-zA-Z0-9_]{3,20}$/.test(u);
 }
 function isValidPassword(p) {
-  return typeof p === 'string' && p.length >= 6 && p.length <= 50;
+  return typeof p === 'string' && p.length >= 4 && p.length <= 50;
 }
 function isValidFilename(f) {
   return typeof f === 'string' &&
@@ -46,7 +44,7 @@ function isValidFilename(f) {
          !f.includes('..');
 }
 function sanitizeHTML(str) {
-  return str
+  return String(str)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
@@ -64,30 +62,30 @@ const hardcodedUsers = {
 
 // ====== Account Lockout ======
 const loginAttempts = {};
-const MAX_ATTEMPTS = 5;
-const LOCKOUT_TIME = 15 * 60 * 1000; // 15 minutes
-const lockoutTimers = {};
+const lockoutUntil  = {};
+const MAX_ATTEMPTS  = 5;
+const LOCKOUT_MS    = 15 * 60 * 1000;
 
-// ====== LOGIN — Secured ======
+// ====== LOGIN ======
 app.post('/login', async (req, res) => {
   const { username, password } = req.body;
 
-  // Input Validation
-  if (!isValidUsername(username)) return res.status(400).send('Invalid username format');
-  if (!isValidPassword(password)) return res.status(400).send('Invalid password format');
+  if (!isValidUsername(username)) return res.status(400).send('Invalid username');
+  if (!isValidPassword(password)) return res.status(400).send('Invalid password');
 
-  // Account Lockout Check
-  if (loginAttempts[username] >= MAX_ATTEMPTS) {
+  // Lockout check
+  if (lockoutUntil[username] && Date.now() < lockoutUntil[username]) {
     return res.status(200).send('Account locked — try again later');
   }
 
-  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'Unknown';
+  const ip = req.headers['x-forwarded-for'] ||
+             req.headers['cf-connecting-ip'] ||
+             req.socket.remoteAddress || 'Unknown';
   const ua = req.headers['user-agent'] || 'Unknown';
 
-  // Check hardcoded users
-  let validUser = hardcodedUsers[username] && hardcodedUsers[username].password === password;
+  let validUser = hardcodedUsers[username] &&
+                  hardcodedUsers[username].password === password;
 
-  // Check MongoDB users
   if (!validUser && db) {
     try {
       const dbUser = await db.collection('users').findOne({ username, password });
@@ -97,27 +95,24 @@ app.post('/login', async (req, res) => {
 
   if (validUser) {
     loginAttempts[username] = 0;
-    clearTimeout(lockoutTimers[username]);
+    delete lockoutUntil[username];
     try {
-      if (db) {
-        await db.collection('users').updateOne(
-          { username },
-          { $set: { lastLogin: new Date(), ip, userAgent: ua } },
-          { upsert: true }
-        );
-      }
+      if (db) await db.collection('users').updateOne(
+        { username },
+        { $set: { lastLogin: new Date(), ip, userAgent: ua } },
+        { upsert: true }
+      );
     } catch(e) {}
     res.status(200).send('Welcome admin');
   } else {
-    if (!loginAttempts[username]) loginAttempts[username] = 0;
-    loginAttempts[username]++;
-
-    // Auto-unlock after 15 minutes
-    clearTimeout(lockoutTimers[username]);
-    lockoutTimers[username] = setTimeout(() => {
-      loginAttempts[username] = 0;
-    }, LOCKOUT_TIME);
-
+    loginAttempts[username] = (loginAttempts[username] || 0) + 1;
+    if (loginAttempts[username] >= MAX_ATTEMPTS) {
+      lockoutUntil[username] = Date.now() + LOCKOUT_MS;
+      setTimeout(() => {
+        loginAttempts[username] = 0;
+        delete lockoutUntil[username];
+      }, LOCKOUT_MS);
+    }
     res.status(200).send('Wrong password');
   }
 });
@@ -127,7 +122,7 @@ app.post('/register', async (req, res) => {
   const { username, email, password } = req.body;
 
   if (!isValidUsername(username)) return res.status(400).send('Invalid username format');
-  if (!isValidPassword(password)) return res.status(400).send('Password must be 6-50 characters');
+  if (!isValidPassword(password)) return res.status(400).send('Password too short');
 
   const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'Unknown';
   const ua = req.headers['user-agent'] || 'Unknown';
@@ -135,8 +130,9 @@ app.post('/register', async (req, res) => {
   try {
     if (!db) return res.status(500).send('DB not connected');
     const existing = await db.collection('users').findOne({ username });
-    if (existing || hardcodedUsers[username]) return res.status(409).send('Username already exists');
-
+    if (existing || hardcodedUsers[username]) {
+      return res.status(409).send('Username already exists');
+    }
     await db.collection('users').insertOne({
       username, password, email: email || '',
       ip, userAgent: ua, role: 'user',
@@ -148,25 +144,25 @@ app.post('/register', async (req, res) => {
   }
 });
 
-// ====== FILE — Secured (Path Traversal Fixed) ======
+// ====== FILE — Path Traversal FIXED ======
 app.get('/file', (req, res) => {
   const file = req.query.name;
 
-  // Input Validation
+  // Validation
   if (!file || !isValidFilename(file)) {
     return res.status(403).send('Access denied — invalid filename');
   }
 
-  // Whitelist only
+  // Whitelist
   const allowed = ['products.txt'];
   if (!allowed.includes(file)) {
     return res.status(403).send('Access denied — file not allowed');
   }
 
-  const base = path.join(__dirname, 'uploads');
+  const base     = path.join(__dirname, 'uploads');
   const fullPath = path.resolve(base, file);
 
-  // Double-check path doesn't escape uploads directory
+  // Path escape check
   if (!fullPath.startsWith(base)) {
     return res.status(403).send('Access denied — path traversal detected');
   }
@@ -178,14 +174,14 @@ app.get('/file', (req, res) => {
   }
 });
 
-// ====== SEARCH — Secured (XSS Fixed) ======
+// ====== SEARCH — XSS FIXED ======
 app.get('/search', (req, res) => {
-  const q = req.query.q || '';
+  const q    = req.query.q || '';
   const safe = sanitizeHTML(q);
   res.send(`<p>Results for: <strong>"${safe}"</strong></p>`);
 });
 
-// ====== ORDER — Secured (IDOR Fixed) ======
+// ====== ORDER — IDOR FIXED ======
 const orders = {
   1: { user: 'ahmed@gmail.com',    product: 'MacBook Pro M4',   card: '****4532' },
   2: { user: 'sara@outlook.com',   product: 'iPhone 17 Pro',    card: '****9876' },
@@ -197,7 +193,6 @@ const orders = {
 app.get('/order', (req, res) => {
   const id = parseInt(req.query.id);
 
-  // Input Validation
   if (isNaN(id) || id < 1 || id > 5) {
     return res.status(400).send('Invalid order ID');
   }
@@ -205,9 +200,8 @@ app.get('/order', (req, res) => {
   const order = orders[id];
   if (!order) return res.status(404).send('Order not found');
 
-  // IDOR Fix — only return order 3 (current user)
-  const currentUser = 'me@techmart.iq';
-  if (order.user !== currentUser) {
+  // IDOR Fix — only allow order 3
+  if (id !== 3) {
     return res.status(403).send('Access denied — not your order');
   }
 
@@ -215,6 +209,8 @@ app.get('/order', (req, res) => {
 });
 
 // ====== ADMIN endpoints ======
+app.get('/admin/attacks', (req, res) => res.json([]));
+
 app.get('/admin/users-db', async (req, res) => {
   try {
     if (!db) return res.json([]);
