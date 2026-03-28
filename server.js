@@ -2,8 +2,21 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const { MongoClient } = require('mongodb');
+const helmet = require('helmet');
 const app = express();
 const port = process.env.PORT || 3000;
+
+// ====== Helmet.js — HTTP Security Headers ======
+app.use(helmet());
+app.use(helmet.contentSecurityPolicy({
+  directives: {
+    defaultSrc: ["'self'"],
+    scriptSrc: ["'self'"],
+    styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+    fontSrc: ["'self'", "https://fonts.gstatic.com"],
+    imgSrc: ["'self'", "data:"],
+  }
+}));
 
 app.use(express.static(__dirname));
 app.use(express.urlencoded({ extended: true }));
@@ -20,31 +33,25 @@ MongoClient.connect(MONGO_URI)
   })
   .catch(err => console.error('MongoDB Error:', err));
 
-// ====== Attack Logger ======
-const attackLog = [];
-
-function logAttack(type, req, data) {
-  const ip = req.headers['x-forwarded-for'] ||
-              req.headers['cf-connecting-ip'] ||
-              req.socket.remoteAddress || 'Unknown';
-  const ua = req.headers['user-agent'] || 'Unknown';
-  const country = req.headers['cf-ipcountry'] || '??';
-
-  const entry = {
-    id: Date.now(),
-    type, ip, country, ua, data,
-    time: new Date().toLocaleString('en-GB')
-  };
-
-  attackLog.unshift(entry);
-  if (attackLog.length > 100) attackLog.pop();
-
-  // Save to MongoDB
-  try {
-    if (db) db.collection('attacks').insertOne({ type, ip, ua, country, data, time: new Date() });
-  } catch(e) {}
-
-  console.log(`[ATTACK] ${type} from ${ip}`);
+// ====== Input Validation ======
+function isValidUsername(u) {
+  return typeof u === 'string' && /^[a-zA-Z0-9_]{3,20}$/.test(u);
+}
+function isValidPassword(p) {
+  return typeof p === 'string' && p.length >= 6 && p.length <= 50;
+}
+function isValidFilename(f) {
+  return typeof f === 'string' &&
+         /^[a-zA-Z0-9_\-\.]+$/.test(f) &&
+         !f.includes('..');
+}
+function sanitizeHTML(str) {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#x27;');
 }
 
 // ====== Hardcoded users ======
@@ -54,19 +61,28 @@ const hardcodedUsers = {
   user:  { password: '123456',      role: 'user'  },
   test:  { password: 'test',        role: 'user'  },
 };
-const loginAttempts = {};
 
-// ====== LOGIN — checks both hardcoded + MongoDB ======
+// ====== Account Lockout ======
+const loginAttempts = {};
+const MAX_ATTEMPTS = 5;
+const LOCKOUT_TIME = 15 * 60 * 1000; // 15 minutes
+const lockoutTimers = {};
+
+// ====== LOGIN — Secured ======
 app.post('/login', async (req, res) => {
   const { username, password } = req.body;
-  if (!username || !password) return res.status(400).send('Missing fields');
 
-  const ip = req.headers['x-forwarded-for'] ||
-              req.headers['cf-connecting-ip'] ||
-              req.socket.remoteAddress || 'Unknown';
+  // Input Validation
+  if (!isValidUsername(username)) return res.status(400).send('Invalid username format');
+  if (!isValidPassword(password)) return res.status(400).send('Invalid password format');
+
+  // Account Lockout Check
+  if (loginAttempts[username] >= MAX_ATTEMPTS) {
+    return res.status(200).send('Account locked — try again later');
+  }
+
+  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'Unknown';
   const ua = req.headers['user-agent'] || 'Unknown';
-
-  if (!loginAttempts[username]) loginAttempts[username] = 0;
 
   // Check hardcoded users
   let validUser = hardcodedUsers[username] && hardcodedUsers[username].password === password;
@@ -81,83 +97,78 @@ app.post('/login', async (req, res) => {
 
   if (validUser) {
     loginAttempts[username] = 0;
-    // Update lastLogin in MongoDB
+    clearTimeout(lockoutTimers[username]);
     try {
       if (db) {
         await db.collection('users').updateOne(
           { username },
-          {
-            $set: { lastLogin: new Date(), ip, userAgent: ua },
-            $setOnInsert: { username, password, role: 'user', createdAt: new Date() }
-          },
+          { $set: { lastLogin: new Date(), ip, userAgent: ua } },
           { upsert: true }
         );
       }
     } catch(e) {}
     res.status(200).send('Welcome admin');
   } else {
+    if (!loginAttempts[username]) loginAttempts[username] = 0;
     loginAttempts[username]++;
-    logAttack('Brute Force', req, {
-      username,
-      password_tried: password,
-      attempt: loginAttempts[username]
-    });
+
+    // Auto-unlock after 15 minutes
+    clearTimeout(lockoutTimers[username]);
+    lockoutTimers[username] = setTimeout(() => {
+      loginAttempts[username] = 0;
+    }, LOCKOUT_TIME);
+
     res.status(200).send('Wrong password');
   }
 });
 
-// ====== REGISTER — Save new user to MongoDB ======
+// ====== REGISTER ======
 app.post('/register', async (req, res) => {
   const { username, email, password } = req.body;
-  if (!username || !password) return res.status(400).send('Missing fields');
 
-  const ip = req.headers['x-forwarded-for'] ||
-              req.headers['cf-connecting-ip'] ||
-              req.socket.remoteAddress || 'Unknown';
+  if (!isValidUsername(username)) return res.status(400).send('Invalid username format');
+  if (!isValidPassword(password)) return res.status(400).send('Password must be 6-50 characters');
+
+  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'Unknown';
   const ua = req.headers['user-agent'] || 'Unknown';
 
   try {
     if (!db) return res.status(500).send('DB not connected');
-
-    // Check if username already exists
     const existing = await db.collection('users').findOne({ username });
-    if (existing) return res.status(409).send('Username already exists');
+    if (existing || hardcodedUsers[username]) return res.status(409).send('Username already exists');
 
-    // Also check hardcoded users
-    if (hardcodedUsers[username]) return res.status(409).send('Username already exists');
-
-    // Save new user
     await db.collection('users').insertOne({
-      username,
-      password,
-      email: email || '',
-      ip,
-      userAgent: ua,
-      role: 'user',
-      createdAt: new Date(),
-      lastLogin: null
+      username, password, email: email || '',
+      ip, userAgent: ua, role: 'user',
+      createdAt: new Date(), lastLogin: null
     });
-
-    console.log(`[REGISTER] New user: ${username} from ${ip}`);
     res.status(200).send('Registered successfully');
   } catch(e) {
     res.status(500).send('Server error');
   }
 });
 
-// ====== FILE — Path Traversal ======
+// ====== FILE — Secured (Path Traversal Fixed) ======
 app.get('/file', (req, res) => {
   const file = req.query.name;
-  if (!file) return res.status(400).send('Missing file name');
+
+  // Input Validation
+  if (!file || !isValidFilename(file)) {
+    return res.status(403).send('Access denied — invalid filename');
+  }
+
+  // Whitelist only
+  const allowed = ['products.txt'];
+  if (!allowed.includes(file)) {
+    return res.status(403).send('Access denied — file not allowed');
+  }
 
   const base = path.join(__dirname, 'uploads');
-  const fullPath = path.join(base, file);
+  const fullPath = path.resolve(base, file);
 
-  if (file.includes('..') || file.includes('/')) {
-    logAttack('Path Traversal', req, {
-      file_requested: file,
-      full_path: fullPath
-    });
+  // Double-check path doesn't escape uploads directory
+  if (!fullPath.startsWith(base)) {
+    return res.status(403).send('Access denied — path traversal detected');
   }
 
   if (fs.existsSync(fullPath)) {
@@ -167,16 +178,14 @@ app.get('/file', (req, res) => {
   }
 });
 
-// ====== SEARCH — XSS ======
+// ====== SEARCH — Secured (XSS Fixed) ======
 app.get('/search', (req, res) => {
   const q = req.query.q || '';
-  if (q.includes('<') || q.includes('script') || q.includes('onerror')) {
-    logAttack('XSS', req, { payload: q });
-  }
-  res.send(`<p>Results for: <strong>"${q}"</strong></p>`);
+  const safe = sanitizeHTML(q);
+  res.send(`<p>Results for: <strong>"${safe}"</strong></p>`);
 });
 
-// ====== ORDER — IDOR ======
+// ====== ORDER — Secured (IDOR Fixed) ======
 const orders = {
   1: { user: 'ahmed@gmail.com',    product: 'MacBook Pro M4',   card: '****4532' },
   2: { user: 'sara@outlook.com',   product: 'iPhone 17 Pro',    card: '****9876' },
@@ -187,36 +196,31 @@ const orders = {
 
 app.get('/order', (req, res) => {
   const id = parseInt(req.query.id);
+
+  // Input Validation
+  if (isNaN(id) || id < 1 || id > 5) {
+    return res.status(400).send('Invalid order ID');
+  }
+
   const order = orders[id];
   if (!order) return res.status(404).send('Order not found');
-  if (id !== 3) {
-    logAttack('IDOR', req, {
-      order_id: id,
-      owner: order.user,
-      product: order.product
-    });
+
+  // IDOR Fix — only return order 3 (current user)
+  const currentUser = 'me@techmart.iq';
+  if (order.user !== currentUser) {
+    return res.status(403).send('Access denied — not your order');
   }
+
   res.json(order);
 });
 
 // ====== ADMIN endpoints ======
-app.get('/admin/attacks', (req, res) => {
-  res.json(attackLog);
-});
-
-app.get('/admin/attacks/clear', (req, res) => {
-  attackLog.length = 0;
-  res.json({ message: 'Log cleared' });
-});
-
 app.get('/admin/users-db', async (req, res) => {
   try {
     if (!db) return res.json([]);
     const users = await db.collection('users').find({}).toArray();
     res.json(users);
-  } catch(e) {
-    res.json([]);
-  }
+  } catch(e) { res.json([]); }
 });
 
 // ====== MAIN ======
@@ -225,5 +229,5 @@ app.get('/', (req, res) => {
 });
 
 app.listen(port, () => {
-  console.log(`TechMart running on port ${port}`);
+  console.log(`TechMart SECURED running on port ${port}`);
 });
