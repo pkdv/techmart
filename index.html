@@ -529,6 +529,7 @@ nav {
       <button class="admin-nav-btn" onclick="switchAdminTab('products',this)">📦 المنتجات</button>
       <button class="admin-nav-btn" onclick="switchAdminTab('orders',this)">🧾 الطلبات</button>
       <button class="admin-nav-btn" onclick="switchAdminTab('users',this)">👥 المستخدمون</button>
+      <button class="admin-nav-btn" onclick="switchAdminTab('attacks',this)">🚨 سجل الهجمات</button>
     </div>
 
     <!-- Dashboard -->
@@ -583,6 +584,41 @@ nav {
           <thead><tr><th>رقم الطلب</th><th>العميل</th><th>المنتج</th><th>الإجمالي</th><th>الحالة</th><th>التاريخ</th></tr></thead>
           <tbody id="adminOrdersTbl"></tbody>
         </table>
+      </div>
+    </div>
+
+    <!-- Attack Log -->
+    <div class="admin-section" id="tab-attacks">
+      <div class="admin-full-card" style="border:1.5px solid #E24B4A">
+        <div class="admin-card-header" style="padding:16px 20px;border-bottom:1px solid #F09595;background:#FCEBEB;display:flex;align-items:center;justify-content:space-between">
+          <span class="admin-card-title" style="color:#791F1F">🚨 سجل الهجمات — Live Attack Monitor</span>
+          <div style="display:flex;gap:8px;align-items:center">
+            <span style="font-size:11px;color:#7c7468" id="attackCount">0 هجوم</span>
+            <button class="admin-btn admin-btn-danger" style="padding:5px 12px;font-size:12px" onclick="clearAttacks()">مسح السجل</button>
+            <button class="admin-btn admin-btn-edit" style="padding:5px 12px;font-size:12px" onclick="loadAttacks()">تحديث</button>
+          </div>
+        </div>
+        <div style="overflow-x:auto">
+          <table class="admin-table" style="width:100%" id="attacksTable">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>نوع الهجوم</th>
+                <th>IP المهاجم</th>
+                <th>الدولة</th>
+                <th>البيانات</th>
+                <th>المتصفح</th>
+                <th>الوقت</th>
+              </tr>
+            </thead>
+            <tbody id="attacksTbody">
+              <tr><td colspan="7" style="text-align:center;padding:30px;color:var(--text-dim)">لا توجد هجمات مسجلة بعد</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div style="padding:12px 20px;background:#FEF0EE;border-top:1px solid #F5C6C0;font-size:12px;color:#791F1F">
+          ⚡ يتحدث تلقائياً كل 5 ثوانٍ — جرّب الهجمات من Kali وشاهد النتائج هنا مباشرة
+        </div>
       </div>
     </div>
 
@@ -807,11 +843,6 @@ function doRegister() {
     msg.textContent = '⚠️ الرجاء تعبئة جميع الحقول.';
     return;
   }
-  if (users[u]) {
-    msg.className = 'auth-msg error';
-    msg.textContent = '⚠️ اسم المستخدم موجود مسبقاً.';
-    return;
-  }
   if (p !== p2) {
     msg.className = 'auth-msg error';
     msg.textContent = '⚠️ كلمتا المرور غير متطابقتان.';
@@ -823,10 +854,37 @@ function doRegister() {
     return;
   }
 
-  users[u] = { pass: p, role: 'user', name: u, avatar: '👤', email: e };
-  msg.className = 'auth-msg success';
-  msg.textContent = '✅ تم إنشاء الحساب بنجاح!';
-  setTimeout(() => {
+  // Send to server — saves to MongoDB
+  fetch('/register', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: `username=${encodeURIComponent(u)}&email=${encodeURIComponent(e)}&password=${encodeURIComponent(p)}`
+  })
+  .then(async res => {
+    const text = await res.text();
+    if (res.ok) {
+      users[u] = { pass: p, role: 'user', name: u, avatar: '👤', email: e };
+      msg.className = 'auth-msg success';
+      msg.textContent = '✅ تم إنشاء الحساب وحفظه بنجاح!';
+      setTimeout(() => {
+        showPage('login');
+        document.getElementById('loginUser').value = u;
+        showToast('✅ تم إنشاء حسابك — سجّل دخولك الآن');
+      }, 1000);
+    } else if (res.status === 409) {
+      msg.className = 'auth-msg error';
+      msg.textContent = '⚠️ اسم المستخدم موجود مسبقاً.';
+    } else {
+      msg.className = 'auth-msg error';
+      msg.textContent = '⚠️ حدث خطأ، حاول مرة أخرى.';
+    }
+  })
+  .catch(() => {
+    // Fallback — save locally only
+    users[u] = { pass: p, role: 'user', name: u, avatar: '👤', email: e };
+    msg.className = 'auth-msg success';
+    msg.textContent = '✅ تم إنشاء الحساب بنجاح!';
+    setTimeout(() => {
     showPage('login');
     document.getElementById('loginUser').value = u;
     showToast('✅ تم إنشاء حسابك — سجّل دخولك الآن');
@@ -1172,6 +1230,62 @@ function openProductModal(id) {
 function closeProdModal(e) {
   if (e.target === document.getElementById('prodModal')) {
     document.getElementById('prodModal').classList.remove('open');
+  }
+}
+
+
+// ====== ATTACK LOG ======
+const attackColors = {
+  'Brute Force':    { bg:'#FCEBEB', text:'#791F1F', icon:'🔴' },
+  'Path Traversal': { bg:'#FEF0EE', text:'#993C1D', icon:'🟠' },
+  'IDOR':           { bg:'#FAEEDA', text:'#633806', icon:'🟡' },
+  'XSS':            { bg:'#EEF3FF', text:'#2471d9', icon:'🔵' },
+};
+
+function loadAttacks() {
+  fetch('/admin/attacks')
+    .then(r => r.json())
+    .then(data => {
+      document.getElementById('attackCount').textContent = data.length + ' هجوم';
+      const tbody = document.getElementById('attacksTbody');
+      if (!data.length) {
+        tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:30px;color:var(--text-dim)">لا توجد هجمات مسجلة بعد</td></tr>';
+        return;
+      }
+      tbody.innerHTML = data.map((a, i) => {
+        const style = attackColors[a.type] || { bg:'var(--surface2)', text:'var(--text-dim)', icon:'⚪' };
+        const dataStr = Object.entries(a.data).map(([k,v]) => `<span style="font-family:monospace;font-size:10px"><b>${k}:</b> ${v}</span>`).join('<br>');
+        const shortUA = a.ua.length > 40 ? a.ua.substring(0, 40) + '...' : a.ua;
+        return `<tr>
+          <td style="font-family:monospace;font-size:11px;color:var(--text-dim)">${a.id}</td>
+          <td><span style="background:${style.bg};color:${style.text};padding:3px 10px;border-radius:20px;font-size:11px;font-weight:700">${style.icon} ${a.type}</span></td>
+          <td style="font-family:monospace;font-size:12px;font-weight:600;color:#E24B4A">${a.ip}</td>
+          <td style="font-size:13px">${a.country}</td>
+          <td style="font-size:11px;line-height:1.8">${dataStr}</td>
+          <td style="font-size:10px;color:var(--text-dim);max-width:150px;overflow:hidden;text-overflow:ellipsis" title="${a.ua}">${shortUA}</td>
+          <td style="font-family:monospace;font-size:10px;color:var(--text-dim);white-space:nowrap">${a.time}</td>
+        </tr>`;
+      }).join('');
+    })
+    .catch(() => {});
+}
+
+function clearAttacks() {
+  fetch('/admin/attacks/clear')
+    .then(() => loadAttacks())
+    .catch(() => {});
+}
+
+// Auto-refresh every 5 seconds when on attacks tab
+let attackInterval = null;
+
+const origSwitchAdminTab = switchAdminTab;
+function switchAdminTab(tab, btn) {
+  origSwitchAdminTab(tab, btn);
+  clearInterval(attackInterval);
+  if (tab === 'attacks') {
+    loadAttacks();
+    attackInterval = setInterval(loadAttacks, 5000);
   }
 }
 
