@@ -780,11 +780,7 @@ function doSearch() {
   const bar = document.getElementById('searchResultsBar');
   if (!q) { bar.style.display='none'; return; }
   bar.style.display = 'block';
-  // ✅ FIXED: Use textContent to prevent XSS
-  const safe = document.createElement('span');
-  safe.textContent = `نتائج البحث عن: "${q}"`;
-  bar.innerHTML = '';
-  bar.appendChild(safe);
+  bar.innerHTML = `نتائج البحث عن: <strong>"${q}"</strong>`;
   const filtered = products.filter(p => p.name.includes(q) || p.brand.includes(q));
   renderProducts(filtered.length ? filtered : products);
 }
@@ -859,29 +855,12 @@ function doRegister() {
   });
 }
 
-// ====== Login Attempts Tracker ======
-const loginAttemptsClient = {};
-const MAX_LOGIN_ATTEMPTS = 5;
-const LOCKOUT_DURATION = 15 * 60 * 1000; // 15 minutes
-const lockoutUntil = {};
-
 function doLogin() {
   const u = document.getElementById('loginUser').value.trim();
   const p = document.getElementById('loginPass').value;
   const msg = document.getElementById('authMsg');
-
-  // Check lockout
-  if (lockoutUntil[u] && Date.now() < lockoutUntil[u]) {
-    const remaining = Math.ceil((lockoutUntil[u] - Date.now()) / 60000);
-    msg.className = 'auth-msg error';
-    msg.textContent = `🔒 الحساب مقفل — حاول بعد ${remaining} دقيقة`;
-    return;
-  }
-
   const found = users[u];
   if (found && found.pass === p) {
-    // Reset attempts on success
-    loginAttemptsClient[u] = 0;
     currentUser = { username: u, ...found };
     msg.className = 'auth-msg success';
     msg.textContent = `✅ مرحباً ${found.name}!`;
@@ -896,29 +875,8 @@ function doLogin() {
       showToast(`مرحباً ${found.name}! 👋`);
     }, 700);
   } else {
-    // Increment attempts
-    if (!loginAttemptsClient[u]) loginAttemptsClient[u] = 0;
-    loginAttemptsClient[u]++;
-
-    const remaining = MAX_LOGIN_ATTEMPTS - loginAttemptsClient[u];
-
-    if (loginAttemptsClient[u] >= MAX_LOGIN_ATTEMPTS) {
-      lockoutUntil[u] = Date.now() + LOCKOUT_DURATION;
-      msg.className = 'auth-msg error';
-      msg.textContent = '🔒 تم قفل الحساب بعد 5 محاولات فاشلة — حاول بعد 15 دقيقة';
-      // Disable login button
-      document.querySelector('.auth-btn').disabled = true;
-      setTimeout(() => {
-        document.querySelector('.auth-btn').disabled = false;
-        loginAttemptsClient[u] = 0;
-        msg.className = 'auth-msg';
-        msg.textContent = '';
-        msg.style.display = 'none';
-      }, LOCKOUT_DURATION);
-    } else {
-      msg.className = 'auth-msg error';
-      msg.textContent = `اسم المستخدم أو كلمة المرور غير صحيحة — تبقى ${remaining} محاولة`;
-    }
+    msg.className = 'auth-msg error';
+    msg.textContent = 'اسم المستخدم أو كلمة المرور غير صحيحة.';
   }
 }
 
