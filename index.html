@@ -880,15 +880,15 @@ function doRegister() {
     }
   })
   .catch(() => {
-    // Fallback — save locally only
     users[u] = { pass: p, role: 'user', name: u, avatar: '👤', email: e };
     msg.className = 'auth-msg success';
     msg.textContent = '✅ تم إنشاء الحساب بنجاح!';
     setTimeout(() => {
-    showPage('login');
-    document.getElementById('loginUser').value = u;
-    showToast('✅ تم إنشاء حسابك — سجّل دخولك الآن');
-  }, 1000);
+      showPage('login');
+      document.getElementById('loginUser').value = u;
+      showToast('✅ تم إنشاء حسابك — سجّل دخولك الآن');
+    }, 1000);
+  });
 }
 
 function doLogin() {
