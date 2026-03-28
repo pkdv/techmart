@@ -110,6 +110,41 @@ app.post('/login', async (req, res) => {
   }
 });
 
+
+// ====== REGISTER — Save new user to MongoDB ======
+app.post('/register', async (req, res) => {
+  const { username, email, password } = req.body;
+  if (!username || !password) return res.status(400).send('Missing fields');
+
+  const ip = req.headers['x-forwarded-for'] ||
+              req.headers['cf-connecting-ip'] ||
+              req.socket.remoteAddress || 'Unknown';
+
+  try {
+    if (!db) return res.status(500).send('DB not connected');
+
+    // Check if username already exists
+    const existing = await db.collection('users').findOne({ username });
+    if (existing) return res.status(409).send('Username already exists');
+
+    // Save new user
+    await db.collection('users').insertOne({
+      username,
+      password,
+      email: email || '',
+      ip,
+      role: 'user',
+      createdAt: new Date(),
+      lastLogin: null
+    });
+
+    console.log(`[REGISTER] New user: ${username} from ${ip}`);
+    res.status(200).send('Registered successfully');
+  } catch (e) {
+    res.status(500).send('Server error');
+  }
+});
+
 // ====== FILE — Path Traversal ======
 app.get('/file', (req, res) => {
   const file = req.query.name;
