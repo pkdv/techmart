@@ -16,9 +16,9 @@ const users = {
 app.post('/login', (req, res) => {
   const { username, password } = req.body;
   if (users[username] && users[username] === password) {
-    res.status(200).send('Login successful');
+    res.status(200).send('Welcome admin');
   } else {
-    res.status(401).send('Invalid credentials');
+    res.status(200).send('Wrong password');
   }
 });
 
