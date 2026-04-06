@@ -781,6 +781,7 @@ function doSearch() {
   if (!q) { bar.style.display='none'; return; }
   bar.style.display = 'block';
   // ⚠️ VULN: innerHTML with unsanitized input — XSS
+  // ⚠️ VULN: innerHTML — XSS
   bar.innerHTML = `نتائج البحث عن: <strong>"${q}"</strong>`;
   const filtered = products.filter(p => p.name.includes(q) || p.brand.includes(q));
   renderProducts(filtered.length ? filtered : products);
