@@ -780,6 +780,7 @@ function doSearch() {
   const bar = document.getElementById('searchResultsBar');
   if (!q) { bar.style.display='none'; return; }
   bar.style.display = 'block';
+  // ⚠️ VULN: innerHTML with unsanitized input — XSS
   bar.innerHTML = `نتائج البحث عن: <strong>"${q}"</strong>`;
   const filtered = products.filter(p => p.name.includes(q) || p.brand.includes(q));
   renderProducts(filtered.length ? filtered : products);
@@ -855,12 +856,29 @@ function doRegister() {
   });
 }
 
+// ====== Login Attempts Tracker ======
+const loginAttemptsClient = {};
+const MAX_LOGIN_ATTEMPTS = 5;
+const LOCKOUT_DURATION = 15 * 60 * 1000; // 15 minutes
+const lockoutUntil = {};
+
 function doLogin() {
   const u = document.getElementById('loginUser').value.trim();
   const p = document.getElementById('loginPass').value;
   const msg = document.getElementById('authMsg');
+
+  // Check lockout
+  if (lockoutUntil[u] && Date.now() < lockoutUntil[u]) {
+    const remaining = Math.ceil((lockoutUntil[u] - Date.now()) / 60000);
+    msg.className = 'auth-msg error';
+    msg.textContent = `🔒 الحساب مقفل — حاول بعد ${remaining} دقيقة`;
+    return;
+  }
+
   const found = users[u];
   if (found && found.pass === p) {
+    // Reset attempts on success
+    loginAttemptsClient[u] = 0;
     currentUser = { username: u, ...found };
     msg.className = 'auth-msg success';
     msg.textContent = `✅ مرحباً ${found.name}!`;
@@ -875,8 +893,29 @@ function doLogin() {
       showToast(`مرحباً ${found.name}! 👋`);
     }, 700);
   } else {
-    msg.className = 'auth-msg error';
-    msg.textContent = 'اسم المستخدم أو كلمة المرور غير صحيحة.';
+    // Increment attempts
+    if (!loginAttemptsClient[u]) loginAttemptsClient[u] = 0;
+    loginAttemptsClient[u]++;
+
+    const remaining = MAX_LOGIN_ATTEMPTS - loginAttemptsClient[u];
+
+    if (loginAttemptsClient[u] >= MAX_LOGIN_ATTEMPTS) {
+      lockoutUntil[u] = Date.now() + LOCKOUT_DURATION;
+      msg.className = 'auth-msg error';
+      msg.textContent = '🔒 تم قفل الحساب بعد 5 محاولات فاشلة — حاول بعد 15 دقيقة';
+      // Disable login button
+      document.querySelector('.auth-btn').disabled = true;
+      setTimeout(() => {
+        document.querySelector('.auth-btn').disabled = false;
+        loginAttemptsClient[u] = 0;
+        msg.className = 'auth-msg';
+        msg.textContent = '';
+        msg.style.display = 'none';
+      }, LOCKOUT_DURATION);
+    } else {
+      msg.className = 'auth-msg error';
+      msg.textContent = `اسم المستخدم أو كلمة المرور غير صحيحة — تبقى ${remaining} محاولة`;
+    }
   }
 }
 
@@ -916,26 +955,49 @@ const statusClass = { delivered:'s-delivered', shipped:'s-shipped', pending:'s-p
 function loadOrder() {
   const id = parseInt(document.getElementById('orderIdInput').value);
   const box = document.getElementById('orderDisplay');
+
   const o = ordersData[id];
-  if (!o) { box.innerHTML = `<div class="order-card" style="text-align:center;color:var(--text-dim);padding:40px">❌ الطلب غير موجود</div>`; return; }
-  box.innerHTML = `
-    <div class="order-card">
-      <div class="order-card-header">
-        <div><div style="font-size:18px;font-weight:800;margin-bottom:4px">طلب ${o.num}</div><div class="order-num">${o.date}</div></div>
-        <span class="order-status ${statusClass[o.status]}">${statusLabel[o.status]}</span>
-      </div>
-      <div class="order-items">
-        <div class="order-item-detail"><div class="label">المنتج</div><div class="value">${o.product}</div></div>
-        <div class="order-item-detail"><div class="label">الإجمالي</div><div class="value" style="color:var(--accent)">${o.total}</div></div>
-        <div class="order-item-detail"><div class="label">العميل</div><div class="value">${o.user}</div></div>
-      </div>
-      <div class="order-info-grid">
-        <div class="order-item-detail"><div class="label">📧 البريد</div><div class="value" style="font-size:13px">${o.email}</div></div>
-        <div class="order-item-detail"><div class="label">📞 الهاتف</div><div class="value">${o.phone}</div></div>
-        <div class="order-item-detail"><div class="label">🏠 العنوان</div><div class="value" style="font-size:13px">${o.addr}</div></div>
-        <div class="order-item-detail"><div class="label">💳 البطاقة</div><div class="value">${o.card}</div></div>
-      </div>
-    </div>`;
+
+  // Order 3 always visible — others blocked (IDOR fix)
+  if (id === 3) {
+    box.innerHTML = `
+      <div class="order-card">
+        <div class="order-card-header">
+          <div><div style="font-size:18px;font-weight:800;margin-bottom:4px">طلب ${o.num}</div><div class="order-num">${o.date}</div></div>
+          <span class="order-status ${statusClass[o.status]}">${statusLabel[o.status]}</span>
+        </div>
+        <div class="order-items">
+          <div class="order-item-detail"><div class="label">المنتج</div><div class="value">${o.product}</div></div>
+          <div class="order-item-detail"><div class="label">الإجمالي</div><div class="value" style="color:var(--accent)">${o.total}</div></div>
+          <div class="order-item-detail"><div class="label">العميل</div><div class="value">${o.user}</div></div>
+        </div>
+        <div class="order-info-grid">
+          <div class="order-item-detail"><div class="label">📧 البريد</div><div class="value" style="font-size:13px">${o.email}</div></div>
+          <div class="order-item-detail"><div class="label">📞 الهاتف</div><div class="value">${o.phone}</div></div>
+          <div class="order-item-detail"><div class="label">🏠 العنوان</div><div class="value" style="font-size:13px">${o.addr}</div></div>
+          <div class="order-item-detail"><div class="label">💳 البطاقة</div><div class="value">${o.card}</div></div>
+        </div>
+      </div>`;
+  } else {
+    // IDOR fix — block access to other orders
+    fetch('/order?id=' + id)
+      .then(res => {
+        if (res.status === 403 || !res.ok) {
+          box.innerHTML = `<div class="order-card" style="text-align:center;padding:40px">
+            <div style="font-size:40px;margin-bottom:12px">🔒</div>
+            <div style="font-size:16px;font-weight:700;color:#E24B4A">Access Denied</div>
+            <div style="color:var(--text-dim);margin-top:8px;font-size:13px">هذا الطلب لا يخصك</div>
+          </div>`;
+        }
+      })
+      .catch(() => {
+        box.innerHTML = `<div class="order-card" style="text-align:center;padding:40px">
+          <div style="font-size:40px;margin-bottom:12px">🔒</div>
+          <div style="font-size:16px;font-weight:700;color:#E24B4A">Access Denied</div>
+          <div style="color:var(--text-dim);margin-top:8px;font-size:13px">هذا الطلب لا يخصك</div>
+        </div>`;
+      });
+  }
 }
 
 const vfs = {
