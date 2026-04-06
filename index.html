@@ -868,57 +868,49 @@ function doLogin() {
   const p = document.getElementById('loginPass').value;
   const msg = document.getElementById('authMsg');
 
-  // Check lockout
-  if (lockoutUntil[u] && Date.now() < lockoutUntil[u]) {
-    const remaining = Math.ceil((lockoutUntil[u] - Date.now()) / 60000);
-    msg.className = 'auth-msg error';
-    msg.textContent = `🔒 الحساب مقفل — حاول بعد ${remaining} دقيقة`;
+  // Check local users first
+  const found = users[u];
+  if (found && found.pass === p) {
+    loginSuccess(u, found);
     return;
   }
 
-  const found = users[u];
-  if (found && found.pass === p) {
-    // Reset attempts on success
-    loginAttemptsClient[u] = 0;
-    currentUser = { username: u, ...found };
-    msg.className = 'auth-msg success';
-    msg.textContent = `✅ مرحباً ${found.name}!`;
-    updateNavForUser();
-    setTimeout(() => {
-      if (found.role === 'admin') {
-        showPage('admin');
-        loadAdminData();
-      } else {
-        showPage('home');
-      }
-      showToast(`مرحباً ${found.name}! 👋`);
-    }, 700);
-  } else {
-    // Increment attempts
-    if (!loginAttemptsClient[u]) loginAttemptsClient[u] = 0;
-    loginAttemptsClient[u]++;
-
-    const remaining = MAX_LOGIN_ATTEMPTS - loginAttemptsClient[u];
-
-    if (loginAttemptsClient[u] >= MAX_LOGIN_ATTEMPTS) {
-      lockoutUntil[u] = Date.now() + LOCKOUT_DURATION;
-      msg.className = 'auth-msg error';
-      msg.textContent = '🔒 تم قفل الحساب بعد 5 محاولات فاشلة — حاول بعد 15 دقيقة';
-      // Disable login button
-      document.querySelector('.auth-btn').disabled = true;
-      setTimeout(() => {
-        document.querySelector('.auth-btn').disabled = false;
-        loginAttemptsClient[u] = 0;
-        msg.className = 'auth-msg';
-        msg.textContent = '';
-        msg.style.display = 'none';
-      }, LOCKOUT_DURATION);
+  // Check MongoDB via server
+  fetch('/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: `username=${encodeURIComponent(u)}&password=${encodeURIComponent(p)}`
+  })
+  .then(async res => {
+    const text = await res.text();
+    if (text.includes('Welcome')) {
+      const dbUser = { pass: p, role: 'user', name: u, avatar: '👤', email: '' };
+      users[u] = dbUser;
+      loginSuccess(u, dbUser);
     } else {
       msg.className = 'auth-msg error';
-      msg.textContent = `اسم المستخدم أو كلمة المرور غير صحيحة — تبقى ${remaining} محاولة`;
+      msg.textContent = 'اسم المستخدم أو كلمة المرور غير صحيحة.';
     }
-  }
+  })
+  .catch(() => {
+    msg.className = 'auth-msg error';
+    msg.textContent = 'اسم المستخدم أو كلمة المرور غير صحيحة.';
+  });
 }
+
+function loginSuccess(u, found) {
+  const msg = document.getElementById('authMsg');
+  currentUser = { username: u, ...found };
+  msg.className = 'auth-msg success';
+  msg.textContent = `✅ مرحباً ${found.name || u}!`;
+  updateNavForUser();
+  setTimeout(() => {
+    if (found.role === 'admin') { showPage('admin'); loadAdminData(); }
+    else { showPage('home'); }
+    showToast(`مرحباً ${found.name || u}! 👋`);
+  }, 700);
+}
+
 
 function doLogout() {
   currentUser = null;
