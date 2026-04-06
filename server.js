@@ -39,6 +39,7 @@ function logAttack(type, req, data) {
   attackLog.unshift(entry);
   if (attackLog.length > 100) attackLog.pop();
 
+  // Save to MongoDB
   try {
     if (db) db.collection('attacks').insertOne({ type, ip, ua, country, data, time: new Date() });
   } catch(e) {}
@@ -55,7 +56,7 @@ const hardcodedUsers = {
 };
 const loginAttempts = {};
 
-// ====== LOGIN — ⚠️ VULNERABLE: No rate limiting, no lockout ======
+// ====== LOGIN — checks both hardcoded + MongoDB ======
 app.post('/login', async (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) return res.status(400).send('Missing fields');
@@ -67,8 +68,10 @@ app.post('/login', async (req, res) => {
 
   if (!loginAttempts[username]) loginAttempts[username] = 0;
 
+  // Check hardcoded users
   let validUser = hardcodedUsers[username] && hardcodedUsers[username].password === password;
 
+  // Check MongoDB users
   if (!validUser && db) {
     try {
       const dbUser = await db.collection('users').findOne({ username, password });
@@ -78,11 +81,15 @@ app.post('/login', async (req, res) => {
 
   if (validUser) {
     loginAttempts[username] = 0;
+    // Update lastLogin in MongoDB
     try {
       if (db) {
         await db.collection('users').updateOne(
           { username },
-          { $set: { lastLogin: new Date(), ip, userAgent: ua } },
+          {
+            $set: { lastLogin: new Date(), ip, userAgent: ua },
+            $setOnInsert: { username, password, role: 'user', createdAt: new Date() }
+          },
           { upsert: true }
         );
       }
@@ -90,7 +97,6 @@ app.post('/login', async (req, res) => {
     res.status(200).send('Welcome admin');
   } else {
     loginAttempts[username]++;
-    // ⚠️ VULN: Logs attack but does NOT block further attempts
     logAttack('Brute Force', req, {
       username,
       password_tried: password,
@@ -100,31 +106,46 @@ app.post('/login', async (req, res) => {
   }
 });
 
-// ====== REGISTER ======
+// ====== REGISTER — Save new user to MongoDB ======
 app.post('/register', async (req, res) => {
   const { username, email, password } = req.body;
   if (!username || !password) return res.status(400).send('Missing fields');
 
-  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'Unknown';
+  const ip = req.headers['x-forwarded-for'] ||
+              req.headers['cf-connecting-ip'] ||
+              req.socket.remoteAddress || 'Unknown';
   const ua = req.headers['user-agent'] || 'Unknown';
 
   try {
     if (!db) return res.status(500).send('DB not connected');
-    const existing = await db.collection('users').findOne({ username });
-    if (existing || hardcodedUsers[username]) return res.status(409).send('Username already exists');
 
+    // Check if username already exists
+    const existing = await db.collection('users').findOne({ username });
+    if (existing) return res.status(409).send('Username already exists');
+
+    // Also check hardcoded users
+    if (hardcodedUsers[username]) return res.status(409).send('Username already exists');
+
+    // Save new user
     await db.collection('users').insertOne({
-      username, password, email: email || '',
-      ip, userAgent: ua, role: 'user',
-      createdAt: new Date(), lastLogin: null
+      username,
+      password,
+      email: email || '',
+      ip,
+      userAgent: ua,
+      role: 'user',
+      createdAt: new Date(),
+      lastLogin: null
     });
+
+    console.log(`[REGISTER] New user: ${username} from ${ip}`);
     res.status(200).send('Registered successfully');
   } catch(e) {
     res.status(500).send('Server error');
   }
 });
 
-// ====== FILE — ⚠️ VULNERABLE: Path Traversal ======
+// ====== FILE — Path Traversal ======
 app.get('/file', (req, res) => {
   const file = req.query.name;
   if (!file) return res.status(400).send('Missing file name');
@@ -132,8 +153,7 @@ app.get('/file', (req, res) => {
   const base = path.join(__dirname, 'uploads');
   const fullPath = path.join(base, file);
 
-  // ⚠️ VULN: No validation — allows ../server.js etc.
-  if (file.includes('..')) {
+  if (file.includes('..') || file.includes('/')) {
     logAttack('Path Traversal', req, {
       file_requested: file,
       full_path: fullPath
@@ -147,17 +167,16 @@ app.get('/file', (req, res) => {
   }
 });
 
-// ====== SEARCH — ⚠️ VULNERABLE: XSS ======
+// ====== SEARCH — XSS ======
 app.get('/search', (req, res) => {
   const q = req.query.q || '';
-  // ⚠️ VULN: No sanitization
   if (q.includes('<') || q.includes('script') || q.includes('onerror')) {
     logAttack('XSS', req, { payload: q });
   }
   res.send(`<p>Results for: <strong>"${q}"</strong></p>`);
 });
 
-// ====== ORDER — ⚠️ VULNERABLE: IDOR ======
+// ====== ORDER — IDOR ======
 const orders = {
   1: { user: 'ahmed@gmail.com',    product: 'MacBook Pro M4',   card: '****4532' },
   2: { user: 'sara@outlook.com',   product: 'iPhone 17 Pro',    card: '****9876' },
@@ -170,8 +189,6 @@ app.get('/order', (req, res) => {
   const id = parseInt(req.query.id);
   const order = orders[id];
   if (!order) return res.status(404).send('Order not found');
-
-  // ⚠️ VULN: No session check — any ID returns any order
   if (id !== 3) {
     logAttack('IDOR', req, {
       order_id: id,
@@ -183,17 +200,23 @@ app.get('/order', (req, res) => {
 });
 
 // ====== ADMIN endpoints ======
-app.get('/admin/attacks', (req, res) => res.json(attackLog));
+app.get('/admin/attacks', (req, res) => {
+  res.json(attackLog);
+});
+
 app.get('/admin/attacks/clear', (req, res) => {
   attackLog.length = 0;
   res.json({ message: 'Log cleared' });
 });
+
 app.get('/admin/users-db', async (req, res) => {
   try {
     if (!db) return res.json([]);
     const users = await db.collection('users').find({}).toArray();
     res.json(users);
-  } catch(e) { res.json([]); }
+  } catch(e) {
+    res.json([]);
+  }
 });
 
 // ====== MAIN ======
